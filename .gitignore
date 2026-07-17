@@ -1,0 +1,17 @@
+# 実際の隠す文字列リスト(本名・メールアドレス等の個人情報そのもの)。
+# 共有するのは mosaic-names.example.txt の方。
+mosaic-names.txt
+
+# 処理対象のスクリーンショット原本と出力(マスク前の個人情報を含み得る)
+input/
+output/
+photo/
+publish/
+out/
+*.masked.*
+
+# 環境・OS ゴミ
+.venv/
+__pycache__/
+*.pyc
+.DS_Store

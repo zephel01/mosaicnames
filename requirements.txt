@@ -1,0 +1,13 @@
+# mosaic-names の依存。インストール: pip install -r requirements.txt
+Pillow>=10.0
+
+# macOS: Vision framework バックエンド(推奨。モデルダウンロード不要・日本語対応)
+pyobjc-framework-Vision; sys_platform == "darwin"
+pyobjc-framework-Quartz; sys_platform == "darwin"
+
+# --- 任意のフォールバックバックエンド(必要ならコメントを外す) ---
+# tesseract を使う場合(別途 brew install tesseract tesseract-lang が必要)
+# pytesseract>=0.3.10
+
+# EasyOCR を使う場合(torch 込みで重い。初回にモデルをダウンロードする)
+# easyocr>=1.7

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# mosaic_names.py を .venv の python で実行するラッパー。
+# venv の activate 不要でどこからでも呼べる:
+#   ./mosaic                 # input/ -> output/ 一括処理
+#   ./mosaic --list          # 検出確認だけ
+#   ./mosaic 画像.png -n 追加文字列
+set -euo pipefail
+cd "$(dirname "$0")"
+if [ ! -x .venv/bin/python ]; then
+  echo "先に ./setup.sh を実行してください" >&2
+  exit 1
+fi
+exec .venv/bin/python mosaic_names.py "$@"

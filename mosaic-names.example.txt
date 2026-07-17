@@ -1,0 +1,27 @@
+# mosaic-names.txt のサンプル。
+# コピーして使う: cp mosaic-names.example.txt mosaic-names.txt
+#
+# 書き方:
+#   - 1行1エントリ。# で始まる行と空行は無視
+#   - 大文字小文字は区別しない。行の中の部分一致でもその部分だけモザイク化される
+#   - OCR の誤読(0/O, 1/l/I の混同、空白の誤挿入)に耐性があるので、そのまま書けばよい
+#   - `re:` で始まる行は正規表現(大文字小文字無視)
+
+# --- 固定文字列の例(自分のものに置き換える) ---
+yourname
+your-github-account
+Your Full Name
+your.email@example.com
+your-machine-name
+
+# --- 正規表現の例 ---
+# メールアドレス全般
+re:[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}
+
+# API キー類: sk- で始まるトークン(OpenAI sk-... / Anthropic sk-ant-... など)
+re:\bsk-[a-z0-9_-]{8,}
+
+# 必要に応じて追加する例:
+# re:\bghp_[a-z0-9]{20,}          # GitHub personal access token
+# re:\bxox[bpars]-[a-z0-9-]{10,}  # Slack token
+# re:\bAKIA[0-9A-Z]{16}           # AWS access key ID
