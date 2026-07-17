@@ -30,8 +30,8 @@
 ## 🚀 クイックスタート
 
 ```bash
-git clone https://github.com/zephel01/mosaic-names.git
-cd mosaic-names
+git clone https://github.com/zephel01/mosaicnames.git
+cd mosaicnames
 ./setup.sh        # venv・依存・設定ファイル・input/ output/ を全部用意(冪等)
 ```
 
