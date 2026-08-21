@@ -22,6 +22,16 @@ OCR バックエンド(--backend auto|vision|tesseract|easyocr):
     tesseract: pytesseract + tesseract 本体(brew install tesseract)
     easyocr  : EasyOCR(モデルダウンロードあり。~/.EasyOCR を再利用)
 
+低解像度画像の自動拡大:
+    長辺が --upscale-threshold px(既定 1200)未満の画像は、OCR にかける前
+    だけ --upscale-factor で指定した倍率(既定 2,3 の複数倍率)に拡大して
+    それぞれ OCR にかけ、検出結果を合算する。小さいスクリーンショットは
+    文字が潰れて OCR が取りこぼしやすく、しかも同じ画像内でも倍率によって
+    どの箇所を読み取れるかにばらつきが出ることがあるため、複数倍率を試す。
+    検出座標は元解像度に割り戻すので、実際にモザイクをかける画像は常に
+    元の解像度のまま。--upscale-threshold 0 か --upscale-factor に1以下
+    しか指定しない場合は無効化できる。
+
 出力:
     既定では入力の隣に <stem>.masked<ext> を書き出す。元ファイルは変更しない。
 """
@@ -29,9 +39,11 @@ OCR バックエンド(--backend auto|vision|tesseract|easyocr):
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import re
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -179,6 +191,82 @@ def sub_box(x: int, y: int, w: int, h: int, text: str, start: int, end: int) -> 
     x0 = x + int(w * start / n)
     x1 = x + int(w * end / n)
     return x0, y, max(1, x1 - x0), h
+
+
+# ------------------------------------------------------- low-res pre-upscale
+
+
+# 低解像度スクリーンショット対策の既定値。長辺がこれ未満なら OCR 前に拡大する。
+# 倍率を複数試すのは、同じ画像内でも倍率によって OCR が読み取れる箇所に
+# ばらつきが出ることがあるため(例: 同じ行が2箇所あるのに片方だけ拡大率
+# 次第で読み落とされる)。
+DEFAULT_UPSCALE_THRESHOLD = 1200
+DEFAULT_UPSCALE_FACTORS: tuple[float, ...] = (2.0, 3.0)
+
+
+def scale_variants(
+    path: Path, threshold: int, factors: tuple[float, ...]
+) -> list[tuple[Path, float, Path | None]]:
+    """OCR に渡す(パス, スケール倍率, 削除すべき一時ファイル)の候補を返す。
+
+    長辺が threshold px 以上ならそのまま(scale=1.0)の1件だけを返す。
+    未満の場合は factors それぞれで拡大した一時ファイルを候補として返す。
+    process() 側はこの全候補で OCR し、検出結果を合算する。
+    """
+    if threshold <= 0:
+        return [(path, 1.0, None)]
+    with Image.open(path) as im:
+        long_edge = max(im.width, im.height)
+        if long_edge >= threshold:
+            return [(path, 1.0, None)]
+        base_w, base_h = im.width, im.height
+        rgb = im.convert("RGB")
+        variants: list[tuple[Path, float, Path | None]] = []
+        for factor in factors:
+            if factor <= 1.0:
+                continue
+            new_size = (max(1, round(base_w * factor)), max(1, round(base_h * factor)))
+            upscaled = rgb.resize(new_size, Image.LANCZOS)
+            fd, tmp_name = tempfile.mkstemp(suffix=".png", prefix="mosaic_names_upscale_")
+            os.close(fd)
+            tmp_path = Path(tmp_name)
+            upscaled.save(tmp_path)
+            variants.append((tmp_path, factor, tmp_path))
+    return variants or [(path, 1.0, None)]
+
+
+def rescale_box(b: Box, scale: float) -> Box:
+    """OCR 用に拡大した画像上の座標を、元解像度の座標に割り戻す。"""
+    if scale == 1.0:
+        return b
+    return Box(
+        b.name,
+        round(b.x / scale),
+        round(b.y / scale),
+        max(1, round(b.w / scale)),
+        max(1, round(b.h / scale)),
+        b.source_text,
+    )
+
+
+def dedupe_boxes(boxes: list[Box]) -> list[Box]:
+    """複数倍率での検出を合算する際、同じ箇所の重複検出を1件にまとめる。
+
+    倍率ごとに丸め誤差でわずかに座標がずれるため、中心が互いのボックス
+    サイズ以内に収まっていれば同一箇所とみなす(厳密な IoU ではなく簡易判定)。
+    """
+    kept: list[Box] = []
+    for b in boxes:
+        bcx, bcy = b.x + b.w / 2, b.y + b.h / 2
+        if any(
+            k.name == b.name
+            and abs(bcx - (k.x + k.w / 2)) < max(k.w, b.w)
+            and abs(bcy - (k.y + k.h / 2)) < max(k.h, b.h)
+            for k in kept
+        ):
+            continue
+        kept.append(b)
+    return kept
 
 
 # ------------------------------------------------------------- OCR backends
@@ -374,6 +462,14 @@ def expand_inputs(inputs: list[Path]) -> list[Path]:
     return files
 
 
+def _parse_factors(value: str) -> tuple[float, ...]:
+    """--upscale-factor の値(カンマ区切り可)を float のタプルにする。"""
+    try:
+        return tuple(float(v) for v in value.split(",") if v.strip())
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"数値のカンマ区切りで指定してください: {value!r}") from e
+
+
 def output_path(path: Path, args) -> Path:
     if args.in_place:
         return path
@@ -390,21 +486,41 @@ def process(path: Path, targets: Targets, args, progress: str = "") -> int:
         print(f"{progress}{path}: 出力が既にあるためスキップ -> {out}")
         return 0
 
+    variants = scale_variants(path, args.upscale_threshold, args.upscale_factors)
+    multi_scale = len(variants) > 1 or variants[0][1] != 1.0
+
     last_err: Exception | None = None
     boxes: list[Box] = []
-    used = None
-    for backend in pick_backend(args.backend):
-        try:
-            boxes = BACKENDS[backend](path, targets)
-            used = backend
-            break
-        except ImportError as e:
-            last_err = e
-        except Exception as e:
-            last_err = e
+    used: str | None = None
+    tmp_paths = [v[2] for v in variants if v[2] is not None]
+    try:
+        for ocr_path, scale, _ in variants:
+            found: list[Box] | None = None
+            for backend in pick_backend(args.backend):
+                try:
+                    found = BACKENDS[backend](ocr_path, targets)
+                    used = backend
+                    break
+                except ImportError as e:
+                    last_err = e
+                except Exception as e:
+                    last_err = e
+            if found is None:
+                continue
+            if scale != 1.0:
+                found = [rescale_box(b, scale) for b in found]
+                print(f"{progress}{path}: OCR前に{scale:g}倍に拡大して検出 ({len(found)}件)")
+            boxes.extend(found)
+    finally:
+        for tp in tmp_paths:
+            tp.unlink(missing_ok=True)
+
     if used is None:
         print(f"{progress}{path}: OCR バックエンドを起動できませんでした: {last_err}", file=sys.stderr)
         return 1
+
+    if multi_scale:
+        boxes = dedupe_boxes(boxes)
 
     for b in boxes:
         print(f"{progress}{path}: [{used}] '{b.name}' @ ({b.x},{b.y}) {b.w}x{b.h}  <- {b.source_text!r}")
@@ -457,6 +573,20 @@ def main() -> int:
     )
     ap.add_argument("--backend", choices=["auto", *BACKENDS], default="auto")
     ap.add_argument("--pad", type=int, default=3, help="モザイク領域の余白px(既定3)")
+    ap.add_argument(
+        "--upscale-threshold",
+        type=int,
+        default=DEFAULT_UPSCALE_THRESHOLD,
+        help=f"長辺がこの px 未満の画像は OCR 前に自動拡大する(既定 {DEFAULT_UPSCALE_THRESHOLD}。0で無効)",
+    )
+    ap.add_argument(
+        "--upscale-factor",
+        dest="upscale_factors",
+        type=_parse_factors,
+        default=DEFAULT_UPSCALE_FACTORS,
+        help="自動拡大の倍率。カンマ区切りで複数指定すると全倍率で検出して結果を合算する"
+        f"(既定 {','.join(str(f) for f in DEFAULT_UPSCALE_FACTORS)}。1以下のみなら無効)",
+    )
     ap.add_argument("--list", action="store_true", help="検出位置を表示するだけで書き込まない")
     ap.add_argument("--in-place", action="store_true", help="元ファイルを上書きする")
     ap.add_argument("-o", "--output", default=None, help="出力ファイル名(画像1枚のときのみ)")
