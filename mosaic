@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# mosaic_names.py を .venv の python で実行するラッパー。
-# venv の activate 不要でどこからでも呼べる:
+# mosaic_names.py を uv 管理の環境で実行するラッパー。
+# uv run が .venv と依存(uv.lock)の同期まで面倒を見るので、
+# activate も ./setup.sh も無しでどこからでも呼べる:
 #   ./mosaic                 # input/ -> output/ 一括処理
 #   ./mosaic --list          # 検出確認だけ
 #   ./mosaic 画像.png -n 追加文字列
 set -euo pipefail
 cd "$(dirname "$0")"
-if [ ! -x .venv/bin/python ]; then
-  echo "先に ./setup.sh を実行してください" >&2
+if ! command -v uv >/dev/null 2>&1; then
+  cat >&2 <<'MSG'
+uv が見つかりません。インストールしてください:
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  # Homebrew なら: brew install uv
+MSG
   exit 1
 fi
-exec .venv/bin/python mosaic_names.py "$@"
+exec uv run --quiet mosaic-names "$@"

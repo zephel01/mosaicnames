@@ -14,6 +14,13 @@ out/
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 .DS_Store
+
+# ビルド成果物(uv build / hatchling)
+dist/
+*.egg-info/
+
+# uv.lock は依存バージョンを固定するためのファイルなのでコミットする(無視しない)
 
 docs/note/

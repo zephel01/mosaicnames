@@ -1,0 +1,43 @@
+[project]
+name = "mosaic-names"
+version = "0.2.0"
+description = "スクリーンショットに写り込んだ指定文字列を OCR で見つけて自動モザイクする、ローカル完結ツール"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "zephel01" }]
+keywords = ["ocr", "screenshot", "privacy", "mosaic", "redaction"]
+
+# 既定バックエンドは macOS の Vision framework(追加モデル不要・完全ローカル)。
+# macOS 以外では Pillow だけが入り、tesseract / easyocr は任意 extra で足す。
+dependencies = [
+    "pillow>=10.0",
+    "pyobjc-framework-Vision>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+]
+
+[project.optional-dependencies]
+# uv sync --extra tesseract(別途 `brew install tesseract tesseract-lang` が必要)
+tesseract = ["pytesseract>=0.3.10"]
+# uv sync --extra easyocr(torch 込みで重い。初回にモデルをダウンロードする)
+easyocr = ["easyocr>=1.7"]
+
+[project.scripts]
+mosaic-names = "mosaic_names:main"
+
+[project.urls]
+Homepage = "https://github.com/zephel01/mosaicnames"
+
+# 開発用。uv sync で既定インストールされる(不要なら uv sync --no-dev)。
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# 単一ファイルのスクリプトなので、配布物にもその1ファイルだけを入れる。
+[tool.hatch.build.targets.wheel]
+only-include = ["mosaic_names.py"]
+
+[tool.hatch.build.targets.sdist]
+include = ["mosaic_names.py", "mosaic-names.example.txt", "README.md", "tests"]

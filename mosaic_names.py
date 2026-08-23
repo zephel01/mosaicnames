@@ -15,6 +15,13 @@
     スクリプトと同じディレクトリの mosaic-names.txt(1行1エントリ、# はコメント)。
     --names-file で別ファイルも指定可。大文字小文字は区別しない。
 
+OCR 誤読への耐性:
+    照合前に小文字化・空白除去に加えて、OCR が混同しやすい 0/O・1/l/I を
+    同一視する。それでも吸収しきれない未知の誤読(例: ターミナルのスラッシュ
+    付きゼロが `@` と読まれて `zephel01` が `zephel@1` になる)に備えて、
+    6文字以上のエントリは編集距離1〜2までの近似一致も既定で許容する
+    (--no-fuzzy で無効化)。
+
 OCR バックエンド(--backend auto|vision|tesseract|easyocr):
     auto     : macOS なら vision、それ以外は tesseract → easyocr の順に試す
     vision   : macOS 標準の Vision framework(推奨。追加モデル不要・日本語対応)
@@ -50,8 +57,11 @@ from pathlib import Path
 try:
     from PIL import Image
 except ImportError:  # pragma: no cover
-    print("Pillow が必要です: pip install pillow", file=sys.stderr)
+    print("Pillow が必要です: uv sync(または pip install pillow)", file=sys.stderr)
     sys.exit(2)
+
+
+__version__ = "0.2.0"
 
 
 # ---------------------------------------------------------------- data model
@@ -74,13 +84,17 @@ class Box:
 
 @dataclass
 class Targets:
-    """照合対象: 固定文字列のリストと、`re:` 行から作った正規表現のリスト。"""
+    """照合対象: 固定文字列のリストと、`re:` 行から作った正規表現のリスト。
+
+    fuzzy が True のとき、固定文字列は近似一致(編集距離)でも照合する。
+    """
 
     names: list[str]
     regexes: list[re.Pattern]
+    fuzzy: bool = True
 
 
-def load_names(names_file: Path | None, extra: list[str]) -> Targets:
+def load_names(names_file: Path | None, extra: list[str], fuzzy: bool = True) -> Targets:
     """mosaic-names.txt と -n を読み込む。
 
     `re:` で始まる行は正規表現(大文字小文字無視)として扱う。
@@ -112,7 +126,7 @@ def load_names(names_file: Path | None, extra: list[str]) -> Targets:
     if not names and not regexes:
         print("隠す文字列がありません(mosaic-names.txt か -n で指定)", file=sys.stderr)
         sys.exit(2)
-    return Targets(names, regexes)
+    return Targets(names, regexes, fuzzy)
 
 
 # OCR がよく間違える文字の正規化表(照合専用)。0とO、1とl/I/| を同一視する。
@@ -140,6 +154,65 @@ def _normalize(text: str, confusion: bool = True) -> tuple[str, list[int]]:
     return "".join(out), index_map
 
 
+# ---- あいまい一致(近似部分一致) ----
+#
+# 混同表で拾えるのは既知の誤読だけで、実際の OCR はもっと自由に間違える。
+# 例: ターミナルのスラッシュ付きゼロが `@` と読まれて `zephel01` が
+# `zephel@1` になる、装飾フォントで `rn` が `m` になる、など。
+# そこで固定文字列は「ほぼ一致」でも拾えるようにする。ただし短いエントリで
+# 距離を許すと誤爆だらけになるため、正規化後の長さで足切りする。
+FUZZY_MIN_LEN = 6
+
+
+def _fuzzy_max_dist(length: int) -> int:
+    """正規化後の長さから、許容する編集距離を決める。0 なら近似一致しない。"""
+    if length < FUZZY_MIN_LEN:
+        return 0
+    return 1 if length <= 12 else 2
+
+
+def _fuzzy_spans(hay: str, needle: str, max_dist: int) -> list[tuple[int, int, int]]:
+    """hay 中の needle への近似部分一致を (start, end, 編集距離) で返す。
+
+    先頭行を 0 で初期化した Levenshtein DP(近似部分文字列検索)。列 i まで
+    見たときの最小距離が max_dist 以下ならそこを終端とする一致とみなす。
+    どの位置から始まった一致かを cur_from で併せて追跡し、モザイク範囲を
+    決められるようにしている。
+    """
+    n, m = len(hay), len(needle)
+    if m == 0 or n == 0:
+        return []
+    prev = list(range(m + 1))
+    prev_from = [0] * (m + 1)
+    out: list[tuple[int, int, int]] = []
+    for i in range(1, n + 1):
+        cur = [0] * (m + 1)
+        cur_from = [0] * (m + 1)
+        cur_from[0] = i  # 長さ0の一致はこの位置から始まる扱いにする
+        for j in range(1, m + 1):
+            best = prev[j - 1] + (0 if hay[i - 1] == needle[j - 1] else 1)
+            bfrom = prev_from[j - 1]
+            if prev[j] + 1 < best:  # OCR が余計な文字を挟んだ
+                best, bfrom = prev[j] + 1, prev_from[j]
+            if cur[j - 1] + 1 < best:  # OCR が文字を読み落とした
+                best, bfrom = cur[j - 1] + 1, cur_from[j - 1]
+            cur[j], cur_from[j] = best, bfrom
+        if cur[m] <= max_dist and cur_from[m] < i:
+            out.append((cur_from[m], i, cur[m]))
+        prev, prev_from = cur, cur_from
+    return out
+
+
+def _pick_fuzzy(spans: list[tuple[int, int, int]]) -> list[tuple[int, int, int]]:
+    """近似一致は終端ごとに大量に出るので、重なりは最も距離の小さいものだけ残す。"""
+    kept: list[tuple[int, int, int]] = []
+    for s, e, d in sorted(spans, key=lambda t: (t[2], t[0] - t[1], t[0])):
+        if any(s < ke and ks < e for ks, ke, _ in kept):
+            continue
+        kept.append((s, e, d))
+    return kept
+
+
 def find_spans(text: str, targets: Targets) -> list[tuple[int, int, str]]:
     """text 中の全ターゲット出現を (start, end, label) で返す。
 
@@ -164,6 +237,20 @@ def find_spans(text: str, targets: Targets) -> list[tuple[int, int, str]]:
                     break
                 spans.add((index_map[i], index_map[i + len(needle) - 1] + 1, name))
                 start = i + 1
+
+    # ---- 固定文字列(あいまい一致。未知の誤読を1〜2文字まで許容) ----
+    if targets.fuzzy and hay:
+        exact = sorted(spans)  # 完全一致済みの区間は再検出しない
+        for name in targets.names:
+            needle, _ = _normalize(name, confusion=True)
+            max_dist = _fuzzy_max_dist(len(needle))
+            if not max_dist:
+                continue
+            for s, e, _dist in _pick_fuzzy(_fuzzy_spans(hay, needle, max_dist)):
+                a, b = index_map[s], index_map[e - 1] + 1
+                if any(nm == name and a < ee and ss < b for ss, ee, nm in exact):
+                    continue
+                spans.add((a, b, name))
 
     # ---- 正規表現 ----
     if targets.regexes:
@@ -470,6 +557,17 @@ def _parse_factors(value: str) -> tuple[float, ...]:
         raise argparse.ArgumentTypeError(f"数値のカンマ区切りで指定してください: {value!r}") from e
 
 
+def beside_script_or_cwd(name: str) -> Path:
+    """スクリプトの隣 → カレントディレクトリの順に探し、見つかった方を返す。
+
+    リポジトリ内で `./mosaic` を叩く通常の使い方ではスクリプトの隣が当たる。
+    `mosaic-names` コマンドとして別のディレクトリから呼んだときのために、
+    無ければカレントディレクトリ側を返す。
+    """
+    beside = Path(__file__).resolve().parent / name
+    return beside if beside.exists() else Path.cwd() / name
+
+
 def output_path(path: Path, args) -> Path:
     if args.in_place:
         return path
@@ -572,6 +670,14 @@ def main() -> int:
         help="隠す文字列リスト(既定: スクリプトと同じ場所の mosaic-names.txt)",
     )
     ap.add_argument("--backend", choices=["auto", *BACKENDS], default="auto")
+    ap.add_argument(
+        "--no-fuzzy",
+        dest="fuzzy",
+        action="store_false",
+        help=f"あいまい一致を無効化する(既定は有効。{FUZZY_MIN_LEN}文字以上のエントリを"
+        "編集距離1〜2まで許容して OCR の未知の誤読を吸収する)",
+    )
+    ap.add_argument("--version", action="version", version=f"mosaic-names {__version__}")
     ap.add_argument("--pad", type=int, default=3, help="モザイク領域の余白px(既定3)")
     ap.add_argument(
         "--upscale-threshold",
@@ -605,8 +711,8 @@ def main() -> int:
     # 引数なし: input/ -> output/ の既定ワークフロー。入力フォルダには一切
     # 書き込まない(出力は必ず output/ 側)。
     if not args.images:
-        base = Path(__file__).resolve().parent
-        default_in = base / "input"
+        default_in = beside_script_or_cwd("input")
+        base = default_in.parent
         if not default_in.is_dir():
             ap.error(
                 "画像を指定するか、input/ フォルダを作って画像を置いてください"
@@ -623,8 +729,8 @@ def main() -> int:
     if args.out_dir and args.in_place:
         ap.error("--out-dir と --in-place は同時に使えません")
 
-    names_file = args.names_file or Path(__file__).resolve().parent / "mosaic-names.txt"
-    names = load_names(names_file, args.name)
+    names_file = args.names_file or beside_script_or_cwd("mosaic-names.txt")
+    names = load_names(names_file, args.name, fuzzy=args.fuzzy)
 
     rc = 0
     total = len(files)
